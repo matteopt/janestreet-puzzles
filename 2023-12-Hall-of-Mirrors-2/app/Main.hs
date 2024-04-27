@@ -6,16 +6,17 @@ import Control.Monad (guard)
 import Data.Fixed (mod')
 import Data.List (sortOn)
 import Data.Maybe (isJust, fromMaybe, listToMaybe)
-import GHC.Float (float2Double, double2Float)
+import GHC.Float (float2Double)
 import Linear (V2 (..), Metric (distance))
 import Linear.Metric (dot, signorm)
 import Linear.Vector ((^*))
 import Raylib.Core (initWindow, beginDrawing, endDrawing, windowShouldClose, clearBackground, setConfigFlags, getMousePosition, isKeyPressed)
-import Raylib.Core.Shapes (drawLineV, drawRectangleLinesEx, drawRectangleRec)
+import Raylib.Core.Shapes (drawRectangleLinesEx, drawRectangleRec, drawLine)
 import Raylib.Types (Vector2(..), ConfigFlag (VsyncHint), Rectangle (Rectangle, rectangle'x, rectangle'y, rectangle'width, rectangle'height), Color (Color), KeyboardKey (..))
 import Raylib.Util (WindowResources)
 import Raylib.Util.Colors (white, black, yellow, gray)
 import Raylib.Core.Text (drawText)
+import FractionalOps (intersectSegSeg)
 
 -- ( ( CellXi, CellYi ), AngleDeg )
 type Mirror = ((Float, Float), Float)
@@ -34,70 +35,59 @@ fi = fromIntegral
 f2d :: Float -> Double
 f2d = float2Double
 
-d2f :: Double -> Float
-d2f = double2Float
-
 rads :: Floating a => a -> a
 rads d = d * (pi / 180)
-
-v2 :: Float -> Float -> Vector2
-v2 x y = Vector2 { vector2'x = x, vector2'y = y }
-
-rlV2 :: V2 Double -> Vector2
-rlV2 (V2 a b) = v2 (d2f a) (d2f b)
 
 v2Rl :: Vector2 -> V2 Double
 v2Rl v = V2 (f2d v.vector2'x) (f2d v.vector2'y)
 
-drawLineV' :: V2 Double -> V2 Double -> Color -> IO ()
-drawLineV' a b c = drawLineV (rlV2 a) (rlV2 b) c
+-- Take V2s and get around bugged line rendering in raylib
+drawLineV' :: (RealFrac a) => Color -> V2 a -> V2 a -> IO ()
+drawLineV' c (V2 ax ay) (V2 bx by) = let
+    m = (by - ay) / (bx - ax)
+    q = ay - m * ax
+    (bx', by') = if bx < 0 then (0, q)
+        else if by < 0 then ((-q) / m, 0)
+        else if bx >= fi width then (fi width, m * (fi width) + q)
+        else if by >= fi height then ((fi height - q) / m, fi height)
+        else (bx, by)
+    in drawLine (round ax) (round ay) (round bx') (round by') c
 
-checkCollisionLines' :: (Floating a, Eq a, Ord a) => V2 a -> V2 a -> V2 a -> V2 a -> Maybe (V2 a)
-checkCollisionLines' (V2 a1x a1y) (V2 b1x b1y) (V2 a2x a2y) (V2 b2x b2y) = let
-    d  = (b2y - a2y) * (b1x - a1x) - (b2x - a2x) * (b1y - a1y)
-    xi = ( (a2x - b2x) * (a1x*b1y - a1y*b1x) - (a1x - b1x) * (a2x*b2y - a2y*b2x) ) / d;
-    yi = ( (a2y - b2y) * (a1x*b1y - a1y*b1x) - (a1y - b1y) * (a2x*b2y - a2y*b2x) ) / d;
-    c  = d /= 0 && not (
-        ((a1x - b1x /= 0) && (xi < min a1x b1x || xi > max a1x b1x)) ||
-        ((a2x - b2x /= 0) && (xi < min a2x b2x || xi > max a2x b2x)) ||
-        ((a1y - b1y /= 0) && (yi < min a1y b1y || yi > max a1y b1y)) ||
-        ((a2y - b2y /= 0) && (yi < min a2y b2y || yi > max a2y b2y)) )
-    in if c then Just $ V2 xi yi else Nothing
-
-vector2Reflect' :: (Floating a) => V2 a -> V2 a -> V2 a
+-- Native implementation of raylib vector2Reflect
+vector2Reflect' :: (Fractional a) => V2 a -> V2 a -> V2 a
 vector2Reflect' v@(V2 vx vy) n@(V2 nx ny) = V2 (vx - (2 * nx * dot')) (vy - (2 * ny * dot'))
     where dot' = v `dot` n
 
-laserLengthPx :: (Floating a) => a
+laserLengthPx :: (Fractional a) => a
 laserLengthPx = 10000
 
 gridSize :: Int
 gridSize = 17
 
-cellSizePx :: (Floating a) => a
+cellSizePx :: (Fractional a) => a
 cellSizePx = 50
 
-mirrorSizePx :: (Floating a) => a
+mirrorSizePx :: (Fractional a) => a
 mirrorSizePx = cellSizePx * 0.8
 
-gridSizePx :: (Floating a) => a
+gridSizePx :: (Fractional a) => a
 gridSizePx = fi gridSize * cellSizePx
 
-gridPadPx :: (Floating a) => a
+gridPadPx :: (Fractional a) => a
 gridPadPx = cellSizePx
 
-pad :: (Floating a) => a -> a
+pad :: (Fractional a) => a -> a
 pad = (+) gridPadPx
 
 padR :: Rectangle -> Rectangle
 padR r = r
-    { rectangle'x = r.rectangle'x + (d2f gridPadPx)
-    , rectangle'y = r.rectangle'y + (d2f gridPadPx) }
+    { rectangle'x = pad r.rectangle'x
+    , rectangle'y = pad r.rectangle'y }
 
-padV :: (Floating a) => V2 a -> V2 a
+padV :: (Fractional a) => V2 a -> V2 a
 padV = (+) gridPadPx
 
-padL :: (Floating a) => Line a -> Line a
+padL :: (Fractional a) => Line a -> Line a
 padL (va, vb) = (padV va, padV vb)
 
 width :: Int
@@ -200,15 +190,15 @@ drawGrid = do
     flip mapM_ [0..  (gridSize - 1)] $ \xi -> flip mapM_ [0..  (gridSize - 1)] $ \yi -> drawRectangleLinesEx (gridSquare xi yi) 1 $ Color 75 75 75 255
 
 drawMirror :: Line Double -> IO ()
-drawMirror (va, vb) = drawLineV' va vb white
+drawMirror (va, vb) = drawLineV' white va vb
 
 drawMirrors :: IO ()
 drawMirrors = mapM_ drawMirror mirrorLines
 
 trackLaser :: Double -> Line Double -> [Line Double]
 trackLaser l (va, vb) = let
-    intersections = filter (\(_, i) -> (abs $ distance va i) > 2) $ sortOn (\(_, i) -> distance va i)
-        [ (m, i) | (m, Just i) <- map (\m@(ma, mb) -> (m, checkCollisionLines' va vb ma mb)) mirrorLines ]
+    intersections = filter (\(_, i) -> (abs $ distance va i) > 0.1) $ sortOn (\(_, i) -> distance va i)
+        [ (m, i) | (m, Just i) <- map (\m@(ma, mb) -> (m, intersectSegSeg va vb ma mb)) mirrorLines ]
     in case (listToMaybe intersections) of
         Nothing -> [(va, vb)]
         (Just (((V2 ma_x ma_y), (V2 mb_x mb_y)), i)) -> let
@@ -220,7 +210,8 @@ drawLaser :: State -> IO ()
 drawLaser s = let
     va = fromMaybe s.mv s.fixed
     vb = va + ((V2 (cos $ rads s.ad) (sin $ rads s.ad)) * laserLengthPx)
-    in flip mapM_ (trackLaser laserLengthPx (va, vb)) $ \(va', vb') -> drawLineV' va' vb' yellow
+    tracks = trackLaser laserLengthPx (va, vb)
+    in flip mapM_ tracks $ uncurry (drawLineV' yellow)
 
 drawHint :: IO ()
 drawHint =
@@ -255,8 +246,8 @@ draw s = do
         clearBackground black
         drawGrid
         drawMirrors
-        drawLaser s
         drawHint
+        drawLaser s
     endDrawing
 
 loop :: State -> IO ()
